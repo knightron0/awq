@@ -1,2 +1,0 @@
-"""AWQ reproduction harness scaffold."""
-
