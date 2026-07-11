@@ -10,6 +10,12 @@ def load_test_data():
     print(len(test_dataset))
     return "\n\n".join(test_dataset)
 
+
+def load_train_data():
+    dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1")
+    train_dataset = dataset["train"]["text"]
+    return "\n\n".join(train_dataset)
+
 def rtn_quantize(w):
     # w: (m x n)
     # w_max: (m x n/128 x 128)
@@ -39,12 +45,54 @@ def run_rtn_quantize(model):
                 module.weight.copy_(dequant_weight)
     return model
 
+def eval_perplexity(model, text, tokenizer):
+    tokens = tokenizer(text, return_tensors="pt").input_ids
+
+    num_tokens = tokens.shape[1]
+    max_length = 2048
+    stride = 512
+    prev_end = 0
+
+    total_loss = 0
+    total_tokens = 0
+
+    for begin in tqdm(range(0, num_tokens, stride), desc="eval ppl"):
+        input_ids = tokens[:, begin:(begin + stride)]
+        target_ids = input_ids.clone()
+
+        # already accounted for tokens
+        num_new_tokens = (begin + stride) - prev_end
+        target_ids[:, :-num_new_tokens] = -100
+
+        outputs = model(input_ids=input_ids, labels=target_ids)
+        
+        # outputs returns averaged loss, we gotta unaverage it
+        unaveraged_loss = outputs.loss.item() * (num_new_tokens - 1)
+        total_loss += unaveraged_loss
+        total_tokens += (num_new_tokens - 1)
+
+    avg_nll = total_loss / total_tokens
+    return math.exp(avg_nll)
+
+def collect_weights_activations(model, tokenizer):
+    text = load_train_data()
+    tokens = tokenizer(text, return_tensors="pt").input_ids
+
+    max_length = 2048 
+    stride = 512 
+    max_sequences = 256
+    
+    # trim, we don't need *all* train tokens
+    tokens = tokens[:, : (stride * max_sequences) + max_length]
+    num_tokens = tokens.shape[1]
+    calibration_dataset = {}
+
+    for begin in tqdm(range(0, num_tokens, stride), desc="calibration"):
+        input_ids = tokens[:, begin:(begin + stride)]
+
 
 model_name = "EleutherAI/pythia-14m"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
-text = load_test_data()
-
-tokens = tokenizer(text, return_tensors="pt").input_ids
 
 device = "cpu" #broke
 model = AutoModelForCausalLM.from_pretrained(model_name)
@@ -52,30 +100,9 @@ model.to(device)
 model.eval()
 
 model = run_rtn_quantize(model)
+text = load_test_data()
 
-num_tokens = tokens.shape[1]
-max_length = 2048
-stride = 512
-prev_end = 0
+# ppl = eval_perplexity(model, text)
 
-total_loss = 0
-total_tokens = 0
-
-for begin in tqdm(range(0, num_tokens, stride), desc="eval ppl"):
-    input_ids = tokens[:, begin:(begin + stride)]
-    target_ids = input_ids.clone()
-
-    # already accounted for tokens
-    num_new_tokens = (begin + stride) - prev_end
-    target_ids[:, :-num_new_tokens] = -100
-
-    outputs = model(input_ids=input_ids, labels=target_ids)
-    
-    # outputs returns averaged loss, we gotta unaverage it
-    unaveraged_loss = outputs.loss.item() * (num_new_tokens - 1)
-    total_loss += unaveraged_loss
-    total_tokens += (num_new_tokens - 1)
-
-avg_nll = total_loss / total_tokens
-print("perplexity", math.exp(avg_nll))
-
+# print(ppl)
+collect_weights_activations(model, tokenizer)
