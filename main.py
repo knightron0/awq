@@ -3,11 +3,14 @@ from datasets import load_dataset
 from tqdm import tqdm
 import torch
 import math
+from pathlib import Path
+
+CACHE_DIR = Path("cache")
+CACHE_DIR.mkdir(exist_ok=True)
 
 def load_test_data():
     dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1")
     test_dataset = dataset["test"]["text"]
-    print(len(test_dataset))
     return "\n\n".join(test_dataset)
 
 
@@ -74,7 +77,10 @@ def eval_perplexity(model, text, tokenizer):
     avg_nll = total_loss / total_tokens
     return math.exp(avg_nll)
 
-def collect_weights_activations(model, tokenizer):
+def collect_weights_activations(model, tokenizer, cache_path=CACHE_DIR / "pythia14m_wikitext2_calib.pt"):
+    if cache_path.exists():
+        return torch.load(cache_path)
+
     text = load_train_data()
     tokens = tokenizer(text, return_tensors="pt").input_ids
 
@@ -85,10 +91,45 @@ def collect_weights_activations(model, tokenizer):
     # trim, we don't need *all* train tokens
     tokens = tokens[:, : (stride * max_sequences) + max_length]
     num_tokens = tokens.shape[1]
-    calibration_dataset = {}
+    weights_cache = {}
+    activation_cache = {}
 
-    for begin in tqdm(range(0, num_tokens, stride), desc="calibration"):
-        input_ids = tokens[:, begin:(begin + stride)]
+    def make_hook(name):
+        def hook(module, inputs):
+            x = inputs[0].detach().cpu()
+            activation_cache.setdefault(name, []).append(x)
+        return hook
+
+    handles = []
+
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Linear) and "embed" not in name:
+            handle = module.register_forward_pre_hook(make_hook(name))
+            weights_cache[name] = module.weight.detach().cpu().clone()
+            handles.append(handle)
+
+    model.eval()
+    with torch.no_grad():
+        for begin in tqdm(range(0, num_tokens, stride), desc="calibration"):
+            input_ids = tokens[:, begin:(begin + stride)].to(model.device)
+            model(input_ids=input_ids)
+
+    for handle in handles:
+        handle.remove()
+
+    cache = {
+        "weights": weights_cache,
+        "activations": activation_cache,
+        "metadata": {
+            "model_name": model_name,
+            "dataset": "Salesforce/wikitext:wikitext-2-raw-v1:train",
+            "stride": stride,
+            "max_length": max_length,
+            "max_sequences": max_sequences,
+        },
+    }
+    torch.save(cache, cache_path)
+    return cache
 
 
 model_name = "EleutherAI/pythia-14m"
@@ -97,12 +138,6 @@ tokenizer = AutoTokenizer.from_pretrained(model_name)
 device = "cpu" #broke
 model = AutoModelForCausalLM.from_pretrained(model_name)
 model.to(device)
-model.eval()
 
 model = run_rtn_quantize(model)
 text = load_test_data()
-
-# ppl = eval_perplexity(model, text)
-
-# print(ppl)
-collect_weights_activations(model, tokenizer)
