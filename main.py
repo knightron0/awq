@@ -226,7 +226,7 @@ def search_awq_scales(cache, cache_path=CACHE_DIR / "pythia14m_wikitext2_awq_sca
     torch.save(result, cache_path)
     return result
 
-model_name = "EleutherAI/pythia-14m"
+model_name = "EleutherAI/pythia-70m"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
 device = "cpu" #broke
